@@ -71,7 +71,47 @@ module.exports = function SamplePluginModule(pb) {
      */
     SamplePlugin.onStartupWithContext = function (context, cb) {
 
-        /**
+        pb.RequestHandler.on(pb.RequestHandler.THEME_ROUTE_RETIEVED, function(ctx, cb) {
+            //check for session cookie
+            var self = ctx.requestHandler;
+
+            var cookies = pb.RequestHandler.parseCookies(self.req);
+            var siteObj = pb.RequestHandler.sites[self.hostname];
+            var url = self.url.pathname;
+            self.req.headers[pb.SessionHandler.COOKIE_HEADER] = cookies;
+
+            if(typeof(self.siteObj) !== 'undefined' && self.siteObj.hasOwnProperty('forceLocale') && self.siteObj.forceLocale) {
+                cookies.locale = cookies.locale || cookies[" locale"];
+                cookies.locale = cookies.locale || siteObj.defaultLocale;
+                if (checkRouteContainsLocale(url, siteObj)) {
+                    var redirectLocation = pb.SiteService.getHostWithProtocol(self.hostname);
+                    redirectLocation += '/' + cookies.locale + self.url.path;
+                    return self.doRedirect(redirectLocation, pb.HttpStatus.MOVED_TEMPORARILY);
+                }
+            }
+            cb();
+        });
+
+        function checkRouteContainsLocale(url, siteObj) {
+            //Do not redirect for public resources
+            if (url.indexOf('/public/') !== -1 || url.indexOf('/admin') !== -1 || url.indexOf('/actions/') !== -1 || url.indexOf('/api') !== -1 || url.indexOf('/media') !== -1) {
+                return false;
+            }
+
+            //Do not redirect if the url contains a supported locale.
+            if (siteObj.supportedLocales) {
+                var locales = Object.keys(siteObj.supportedLocales);
+                for (var i = 0; i < locales.length; i++) {
+                    if (url.indexOf(locales[i]) != -1) {
+                        return false;
+                    }
+                }
+            }
+            return true;
+        }
+
+
+            /**
          * Administration Navigation sample
          */
         var site = pb.SiteService.getCurrentSite(context.site);

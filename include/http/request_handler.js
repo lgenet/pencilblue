@@ -28,9 +28,13 @@ var _ = require('lodash');
 
 module.exports = function RequestHandlerModule(pb) {
 
+    //pb dependencies
+    var AsyncEventEmitter = pb.AsyncEventEmitter;
+
     /**
      * Responsible for processing a single req by delegating it to the correct controllers
      * @class RequestHandler
+     * @extends AsyncEventEmitter
      * @constructor
      * @param {Server} server The http server that the request came in on
      * @param {Request} req The incoming request
@@ -97,6 +101,7 @@ module.exports = function RequestHandlerModule(pb) {
          */
         this.errorCount = 0;
     }
+    AsyncEventEmitter.extend(RequestHandler);
 
     /**
      * A mapping that provides the interface type to parse the body based on the
@@ -209,13 +214,13 @@ module.exports = function RequestHandlerModule(pb) {
      * @static
      * @method loadSite
      * @param {Object} site
-     * @param {boolean} site.active 
-     * @param {string} site.uid 
-     * @param {string} site.displayName 
-     * @param {boolean} site.forceLocale 
-     * @param {string} site.hostname 
-     * @param {string} site.defaultLocale 
-     * @param {Array} site.supportedLocales 
+     * @param {boolean} site.active
+     * @param {string} site.uid
+     * @param {string} site.displayName
+     * @param {boolean} site.forceLocale
+     * @param {string} site.hostname
+     * @param {string} site.defaultLocale
+     * @param {Array} site.supportedLocales
      * @param {Array} site.prevHostnames
      */
     RequestHandler.loadSite = function(site) {
@@ -593,19 +598,8 @@ module.exports = function RequestHandlerModule(pb) {
 
         //check for session cookie
         var cookies = RequestHandler.parseCookies(this.req);
-        var siteObj = RequestHandler.sites[this.hostname];
-        var url = this.url.pathname;
         this.req.headers[pb.SessionHandler.COOKIE_HEADER] = cookies;
 
-        if(typeof(siteObj) !== 'undefined' && siteObj.hasOwnProperty('forceLocale') && siteObj.forceLocale) {
-            cookies.locale = cookies.locale || cookies[" locale"];
-            cookies.locale = cookies.locale || siteObj.defaultLocale;
-            if (checkRouteContainsLocale(url, siteObj)) {
-                var redirectLocation = pb.SiteService.getHostWithProtocol(this.hostname);
-                redirectLocation += '/' + cookies.locale + this.url.path;
-                return this.doRedirect(redirectLocation, pb.HttpStatus.MOVED_TEMPORARILY);
-            }
-        }
         //open session
         var self = this;
         pb.session.open(this.req, function(err, session){
@@ -628,32 +622,6 @@ module.exports = function RequestHandlerModule(pb) {
             self.onSessionRetrieved(err, session);
         });
     };
-    /**
-    * @static
-    * @method checkRouteContainsLocale
-    * @param {string} url, the url of the incoming request
-    * @param {Object} siteObj
-    * @param {Array} siteObj.supportedLocales 
-    * @return false if the route should not redirect, true if it should.
-    */
-    function checkRouteContainsLocale(url, siteObj){
-        //Do not redirect for public resources
-        if(url.indexOf('/public/') !== -1 || url.indexOf('/admin') !== -1 || url.indexOf('/actions/') !== -1 || url.indexOf('/api') !== -1 || url.indexOf('/media') !== -1) {
-            return false;
-        }
-
-        //Do not redirect if the url contains a supported locale.
-        if(siteObj.supportedLocales) {
-            var locales =  Object.keys(siteObj.supportedLocales);
-            for (var i = 0; i < locales.length; i++) {
-                if(url.indexOf(locales[i]) != -1){
-                    return false;
-                }
-            }
-        }
-
-        return true;
-    }
 
     /**
      * Derives the locale and localization instance.
@@ -1047,37 +1015,52 @@ module.exports = function RequestHandlerModule(pb) {
             pb.log.silly("RequestHandler: Settling on theme [%s] and method [%s] for URL=[%s:%s]", rt.theme, rt.method, this.req.method, this.url.href);
         }
 
-        //sanity check
-        if (rt.theme === null || rt.method === null || rt.site === null) {
-            return this.serve404();
-        }
-
-        var inactiveSiteAccess = route.themes[rt.site][rt.theme][rt.method].inactive_site_access;
-        if (!this.siteObj.active && !inactiveSiteAccess) {
-            if (this.siteObj.uid === pb.SiteService.GLOBAL_SITE) {
-                return this.doRedirect('/admin');
-            }
-            else {
-                return this.serve404();
-            }
-        }
-
-        //do security checks
-        this.checkSecurity(rt.theme, rt.method, rt.site, function(err, result) {
-            if (pb.log.isSilly()) {
-                pb.log.silly('RequestHandler: Security Result=[%s]', result.success);
-                Object.keys(result.results).forEach(function(key) {
-                    pb.log.silly('RequestHandler:%s: %s', key, JSON.stringify(result.results[key]));
-                });
-            }
-            //all good
-            if (result.success) {
-                return self.onSecurityChecksPassed(activeTheme, rt.theme, rt.method, rt.site, route);
+        //make sure we let the plugins hook in.
+        this.emitThemeRouteRetrieved(function(err) {
+            if (util.isError(err)) {
+                return self.serveError(err);
             }
 
-            //handle failures through bypassing other processing and doing output
-            self.onRenderComplete(err);
+            //sanity check
+            if (rt.theme === null || rt.method === null || rt.site === null) {
+                return self.serve404();
+            }
+
+            var inactiveSiteAccess = route.themes[rt.site][rt.theme][rt.method].inactive_site_access;
+            if (!self.siteObj.active && !inactiveSiteAccess) {
+                if (self.siteObj.uid === pb.SiteService.GLOBAL_SITE) {
+                    return self.doRedirect('/admin');
+                }
+                else {
+                    return self.serve404();
+                }
+            }
+
+            //do security checks
+            self.checkSecurity(rt.theme, rt.method, rt.site, function(err, result) {
+                if (pb.log.isSilly()) {
+                    pb.log.silly('RequestHandler: Security Result=[%s]', result.success);
+                    for (var key in result.results) {
+                        pb.log.silly('RequestHandler:%s: %s', key, JSON.stringify(result.results[key]));
+                    }
+                }
+                //all good
+                if (result.success) {
+                    return self.onSecurityChecksPassed(activeTheme, rt.theme, rt.method, rt.site, route);
+                }
+
+                //handle failures through bypassing other processing and doing output
+                self.onRenderComplete(err);
+            });
         });
+    };
+    RequestHandler.THEME_ROUTE_RETIEVED = 'themeRouteRetrieved';
+    RequestHandler.prototype.emitThemeRouteRetrieved = function(cb) {
+        var context = {
+            themeRoute: this.routeTheme,
+            requestHandler: this
+        };
+        RequestHandler.emit(RequestHandler.THEME_ROUTE_RETIEVED, context, cb);
     };
 
     /**
